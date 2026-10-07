@@ -1,0 +1,8 @@
+# Private keys never touch this repository: tools/make-did.mjs reads them from
+# stdin and writes them to stdout only. These patterns are a second line of
+# defence against a key saved by mistake.
+*.private.jwk
+*private*.json
+*.pem
+.env
+node_modules/

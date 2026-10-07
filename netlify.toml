@@ -1,0 +1,23 @@
+# Netlify — natixar.pro
+#
+# natixar.pro serves two things only: a redirect to natixar.com, and the DID
+# document of the issuer `did:web:natixar.pro`. Nothing is built: the payload is
+# static and versioned as it is served.
+#
+# The DID is served from Netlify rather than from Natixar's own servers on
+# purpose: credentials signed by Natixar must stay verifiable when Natixar's
+# servers are down, or gone.
+
+[build]
+  publish = "public"
+  # No generation. `true` is an explicit no-op, preferable to an empty command
+  # that would let Netlify's framework detection decide on its own.
+  command = "true"
+  # Rebuild only when the payload or this configuration changed — not for a
+  # change to the tooling or the documentation.
+  #
+  # `git diff --quiet` exits 0 when NOTHING changed, and Netlify cancels the
+  # build on exit 0. On the first build $CACHED_COMMIT_REF is empty, the command
+  # fails, the exit code is non-zero, and the build runs: the failure falls on
+  # the safe side.
+  ignore = "git diff --quiet $CACHED_COMMIT_REF $COMMIT_REF -- public netlify.toml"

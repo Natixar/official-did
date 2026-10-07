@@ -1,0 +1,18 @@
+# Response headers for natixar.pro.
+#
+# This file lives INSIDE the published folder rather than in netlify.toml: if
+# the site is ever deployed by drag-and-drop instead of from git, the headers
+# travel with the folder.
+
+/.well-known/did.json
+  # The media type registered by the did:web method. `application/json` remains
+  # the fallback should a third-party resolver refuse this one.
+  Content-Type: application/did+json
+  # ESSENTIAL. Verifiers resolve `did:web:natixar.pro` from a browser, hence
+  # from ANOTHER origin. Without this header the read fails silently, and a
+  # verifier that falls back on an embedded copy would believe it had checked
+  # online without doing so.
+  Access-Control-Allow-Origin: *
+  # A key rotation must be visible at once. Revalidate on every read rather
+  # than serve a superseded document for the lifetime of a cache.
+  Cache-Control: public, max-age=0, must-revalidate
