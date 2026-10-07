@@ -4,6 +4,12 @@
 # the site is ever deployed by drag-and-drop instead of from git, the headers
 # travel with the folder.
 
+/*
+  # No search engine indexes anything served here — the document included.
+  # robots.txt asks crawlers not to fetch; this header tells those that fetch
+  # anyway not to index.
+  X-Robots-Tag: noindex, nofollow, noarchive
+
 /.well-known/did.json
   # The media type registered by the did:web method. `application/json` remains
   # the fallback should a third-party resolver refuse this one.
