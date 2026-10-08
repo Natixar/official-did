@@ -24,11 +24,13 @@ Natixar — **without asking Natixar anything**.
 | Path | Role |
 |---|---|
 | [`public/.well-known/did.json`](public/.well-known/did.json) | the DID document, as served |
-| [`public/_headers`](public/_headers) | response headers: media type, CORS, no caching |
+| [`public/_headers`](public/_headers) | response headers: media type, CORS, no caching, no indexing |
+| [`public/robots.txt`](public/robots.txt) | crawlers are asked to fetch nothing |
 | [`public/index.html`](public/index.html) | human visitors are redirected to natixar.com |
 | [`netlify.toml`](netlify.toml) | Netlify publishes `public/`, builds nothing |
 | [`tools/make-did.mjs`](tools/make-did.mjs) | generates and checks the document |
 | [`tools/make-did.test.mjs`](tools/make-did.test.mjs) | the cases the check must decide |
+| [`tools/site.test.mjs`](tools/site.test.mjs) | what `public/` declares to crawlers and resolvers |
 
 ## Three rules
 
@@ -62,12 +64,34 @@ then the credentials it signed *should* stop verifying.
 and with `Access-Control-Allow-Origin: *`, because verifiers resolve the DID
 from a browser on another origin. Without that header the read fails silently.
 
+## Not indexed
+
+natixar.pro serves a document for machines, not pages for people. Nothing on it
+should appear in search results or web archives:
+
+- [`public/robots.txt`](public/robots.txt) asks every crawler to fetch nothing.
+- `public/_headers` sends `X-Robots-Tag: noindex, nofollow, noarchive` on every
+  path. robots.txt is only a request, and a URL already known from a link can
+  be indexed without being fetched. The header tells crawlers that do fetch not
+  to index, follow or archive.
+
+DID resolution is unaffected: resolvers fetch `/.well-known/did.json` directly
+and read neither. This governs natixar.pro only. The pages of this repository on
+github.com are indexed under GitHub's own policy, which nothing here changes.
+
 ## Checks
 
 ```bash
 node tools/make-did.mjs --verify-file public/.well-known/did.json
 node --test tools/make-did.test.mjs
+node --test tools/site.test.mjs
 ```
+
+`site.test.mjs` reads `public/` as Netlify publishes it. It checks robots.txt,
+and the headers every rule of `_headers` gives `/.well-known/did.json`, taken
+together: no indexing, and still the media type, CORS and no caching. It also
+refuses a header set by two rules for the same path, since both values would
+be sent.
 
 `--verify-file` needs no secret, so it is the check continuous integration can
 run. It refuses a fragment that has the *shape* of a thumbprint without being
