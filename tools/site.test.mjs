@@ -73,7 +73,54 @@ function headersFor(rules, path) {
     .flatMap((rule) => rule.headers.map(([name, value]) => ({ name, value, rule: rule.path })));
 }
 
-const tokens = (value) => value.split(",").map((t) => t.trim().toLowerCase());
+// A header value is a comma-separated list of directives, each `name` or
+// `name=value`. The checks below compare whole directives, never substrings:
+// `noindexnofollownoarchive` is one unknown directive, not three, and
+// `s-max-age=0` is not `max-age=0`.
+
+/** Directives of a header value: Map of lower-cased name → value, or `true`. */
+function directives(value) {
+  const map = new Map();
+  for (const item of value.split(",")) {
+    const m = /^\s*([^=\s]+)\s*(?:=\s*(.*?))?\s*$/.exec(item);
+    if (m) map.set(m[1].toLowerCase(), m[2] ?? true);
+  }
+  return map;
+}
+
+const NOT_INDEXED = ["noindex", "nofollow", "noarchive"];
+
+/** The directives of NOT_INDEXED that an X-Robots-Tag value lacks. */
+const robotsLacks = (value) => NOT_INDEXED.filter((d) => directives(value).get(d) !== true);
+
+/** Whether a Cache-Control value forces revalidation on every read. */
+function revalidatesEveryRead(value) {
+  const d = directives(value);
+  return d.get("max-age") === "0" && d.get("must-revalidate") === true;
+}
+
+// The checks themselves, against values that would fool a substring test.
+// They pass before the change too: they test the test, not the site.
+test("directive checks compare whole directives, not substrings", () => {
+  for (const [value, lacks] of [
+    ["noindex, nofollow, noarchive", []],
+    ["NoIndex,nofollow , noarchive", []],
+    ["noindexnofollownoarchive", NOT_INDEXED],
+    ["noindex nofollow noarchive", NOT_INDEXED],
+    ["noindex, nofollowed, xnoarchive", ["nofollow", "noarchive"]],
+    ["noindex=1, nofollow, noarchive", ["noindex"]],
+  ]) assert.deepEqual(robotsLacks(value), lacks, `X-Robots-Tag: ${value}`);
+
+  for (const [value, ok] of [
+    ["public, max-age=0, must-revalidate", true],
+    ["must-revalidate,max-age=0", true],
+    ["s-max-age=0, must-revalidate", false],
+    ["max-age=0.5, must-revalidate", false],
+    ["max-age=0, x-must-revalidate", false],
+    ["max-age=0must-revalidate", false],
+    ["max-age=00, must-revalidate", false],
+  ]) assert.equal(revalidatesEveryRead(value), ok, `Cache-Control: ${value}`);
+});
 
 test("robots.txt asks every crawler to fetch nothing", async () => {
   const groups = parseRobots(await read("robots.txt"));
@@ -88,9 +135,7 @@ for (const path of ["/", "/robots.txt", DID_PATH, "/any/other/path"]) {
     const found = headersFor(parseHeaders(await read("_headers")), path)
       .filter((h) => h.name === "x-robots-tag");
     assert.equal(found.length, 1, `expected one X-Robots-Tag for ${path}, got ${found.length}`);
-    for (const directive of ["noindex", "nofollow", "noarchive"]) {
-      assert.ok(tokens(found[0].value).includes(directive), `X-Robots-Tag lacks ${directive}`);
-    }
+    assert.deepEqual(robotsLacks(found[0].value), [], `X-Robots-Tag: ${found[0].value}`);
   });
 }
 
@@ -99,9 +144,8 @@ test("the DID document keeps what a resolver needs, and is not indexed", async (
     headersFor(parseHeaders(await read("_headers")), DID_PATH).map((h) => [h.name, h.value]));
   assert.equal(got["content-type"], "application/did+json");
   assert.equal(got["access-control-allow-origin"], "*");
-  assert.match(got["cache-control"] ?? "", /\bmax-age=0\b/);
-  assert.match(got["cache-control"] ?? "", /\bmust-revalidate\b/);
-  assert.ok(tokens(got["x-robots-tag"] ?? "").includes("noindex"), "no X-Robots-Tag: noindex");
+  assert.ok(revalidatesEveryRead(got["cache-control"] ?? ""), `Cache-Control: ${got["cache-control"]}`);
+  assert.deepEqual(robotsLacks(got["x-robots-tag"] ?? ""), [], `X-Robots-Tag: ${got["x-robots-tag"]}`);
 });
 
 // A guard, not a discriminator: it passes before the change too. It refuses
