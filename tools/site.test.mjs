@@ -122,12 +122,21 @@ test("directive checks compare whole directives, not substrings", () => {
   ]) assert.equal(revalidatesEveryRead(value), ok, `Cache-Control: ${value}`);
 });
 
+/**
+ * Why robots.txt fails to block every path for every crawler, or null if it
+ * does. The rules of all `User-agent: *` groups count together. Any `Allow`
+ * among them is refused: for Google, `Allow: /` beats `Disallow: /`.
+ */
+function robotsGap(text) {
+  const rules = parseRobots(text).filter((g) => g.agents.includes("*")).flatMap((g) => g.rules);
+  if (!rules.length) return "no `User-agent: *` group with rules";
+  if (rules.some(([field]) => field === "allow")) return "an `Allow` rule in the `User-agent: *` group";
+  if (!rules.some(([field, value]) => field === "disallow" && value === "/")) return "no `Disallow: /`";
+  return null;
+}
+
 test("robots.txt asks every crawler to fetch nothing", async () => {
-  const groups = parseRobots(await read("robots.txt"));
-  const all = groups.find((g) => g.agents.includes("*"));
-  assert.ok(all, "no `User-agent: *` group");
-  assert.ok(all.rules.some(([field, value]) => field === "disallow" && value === "/"),
-    "the `User-agent: *` group has no `Disallow: /`");
+  assert.equal(robotsGap(await read("robots.txt")), null);
 });
 
 for (const path of ["/", "/robots.txt", DID_PATH, "/any/other/path"]) {
@@ -157,4 +166,45 @@ test("no header reaches the DID document from two rules", async () => {
     assert.ok(!seen.has(name), `${name} is set by both ${seen.get(name)} and ${rule}`);
     seen.set(name, rule);
   }
+});
+
+// --- edge cases ---------------------------------------------------------------
+
+test("robots.txt: look-alikes of `Disallow: /` are refused", () => {
+  for (const [text, gap] of [
+    ["User-agent: *\nDisallow: /\n", null],
+    ["User-agent: *\nDisallow: / # all of it\n", null],
+    ["User-agent: Googlebot\nUser-agent: *\nDisallow: /\n", null],
+    ["User-agent: *\nDisallow:\n", "no `Disallow: /`"],
+    ["User-agent: *\nDisallow: /private\n", "no `Disallow: /`"],
+    ["User-agent: *\nDisallow: /\nAllow: /\n", "an `Allow` rule in the `User-agent: *` group"],
+    ["User-agent: Googlebot\nDisallow: /\n", "no `User-agent: *` group with rules"],
+    ["Disallow: /\n", "no `User-agent: *` group with rules"],
+    ["# User-agent: *\n# Disallow: /\n", "no `User-agent: *` group with rules"],
+  ]) assert.equal(robotsGap(text), gap, JSON.stringify(text));
+});
+
+test("_headers: a `/*` rule applies to the DID document wherever it is written", () => {
+  const didRule = "/.well-known/did.json\n  Content-Type: application/did+json\n";
+  const starRule = "/*\n  X-Robots-Tag: noindex, nofollow, noarchive\n";
+  for (const text of [starRule + didRule, didRule + starRule]) {
+    const names = headersFor(parseHeaders(text), DID_PATH).map((h) => h.name);
+    assert.deepEqual(names.sort(), ["content-type", "x-robots-tag"]);
+  }
+});
+
+test("_headers: header names are compared without case, so the guard sees a repeat", () => {
+  const text = "/*\n  X-Robots-Tag: noindex\n/.well-known/did.json\n  x-robots-tag: noindex\n";
+  const names = headersFor(parseHeaders(text), DID_PATH).map((h) => h.name);
+  assert.deepEqual(names, ["x-robots-tag", "x-robots-tag"]);
+});
+
+test("_headers: a path pattern matches whole paths only", () => {
+  assert.ok(matches("/*", "/"));
+  assert.ok(matches("/*", DID_PATH));
+  assert.ok(matches(DID_PATH, DID_PATH));
+  assert.ok(!matches(DID_PATH, "/.well-known/did.json.bak"));
+  assert.ok(!matches(DID_PATH, "/.well-known/didXjson"));
+  assert.ok(matches("/:dir/did.json", DID_PATH));
+  assert.ok(!matches("/:dir/did.json", "/a/b/did.json"));
 });
