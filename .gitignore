@@ -6,3 +6,4 @@
 *.pem
 .env
 node_modules/
+/.worktrees/
