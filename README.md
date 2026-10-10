@@ -64,16 +64,24 @@ then the credentials it signed *should* stop verifying.
 and with `Access-Control-Allow-Origin: *`, because verifiers resolve the DID
 from a browser on another origin. Without that header the read fails silently.
 
-## Not indexed
+## Not indexed, except `/doc/`
 
-natixar.pro serves a document for machines, not pages for people. Nothing on it
-should appear in search results or web archives:
+natixar.pro serves a document for machines, not pages for people. None of it
+should appear in search results or web archives, **except `/doc/`**: the
+documentation for people, such as how to check by yourself a credential signed
+by a key that has since been revoked.
 
-- [`public/robots.txt`](public/robots.txt) asks every crawler to fetch nothing.
+- [`public/robots.txt`](public/robots.txt) asks every crawler to fetch nothing
+  but `/doc/`.
 - `public/_headers` sends `X-Robots-Tag: noindex, nofollow, noarchive` on every
-  path. robots.txt is only a request, and a URL already known from a link can
-  be indexed without being fetched. The header tells crawlers that do fetch not
-  to index, follow or archive.
+  path outside `/doc/`. robots.txt is only a request, and a URL already known
+  from a link can be indexed without being fetched. The header tells crawlers
+  that do fetch not to index, follow or archive.
+- Netlify cannot exclude one path from a `/*` rule, and crawlers obey the most
+  restrictive of two `X-Robots-Tag` headers. So `_headers` names its
+  non-indexed paths one by one. **A file added outside `/doc/` needs its own
+  rule**: `tools/site.test.mjs` checks every file under `public/`, and fails
+  on a file that is missing one.
 
 DID resolution is unaffected: resolvers fetch `/.well-known/did.json` directly
 and read neither. This governs natixar.pro only. The pages of this repository on
@@ -87,9 +95,11 @@ node --test tools/make-did.test.mjs
 node --test tools/site.test.mjs
 ```
 
-`site.test.mjs` reads `public/` as Netlify publishes it. It checks robots.txt,
-and the headers every rule of `_headers` gives `/.well-known/did.json`, taken
-together: no indexing, and still the media type, CORS and no caching. It also
+`site.test.mjs` reads `public/` as Netlify publishes it. It checks that
+robots.txt allows `/doc/` and nothing else, that every served file outside
+`/doc/` gets `X-Robots-Tag` and nothing under `/doc/` does, and the headers
+every rule of `_headers` gives `/.well-known/did.json`, taken together: no
+indexing, and still the media type, CORS and no caching. It also
 refuses a header set by two rules for the same path, since both values would
 be sent.
 

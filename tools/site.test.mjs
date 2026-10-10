@@ -9,14 +9,42 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
-import { join, dirname, resolve } from "node:path";
+import { readFile, readdir } from "node:fs/promises";
+import { join, dirname, resolve, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const PUBLIC = resolve(dirname(fileURLToPath(import.meta.url)), "..", "public");
 const DID_PATH = "/.well-known/did.json";
 
 const read = (name) => readFile(join(PUBLIC, name), "utf8");
+
+// The only part of natixar.pro that search engines may index: documentation
+// for people, such as how to check a credential signed by a revoked key.
+// Everything else is for machines and stays out of search results.
+const INDEXABLE = ["/doc/"];
+const indexable = (path) => INDEXABLE.some((prefix) => path.startsWith(prefix));
+
+// Paths a crawler can reach under /doc/ once documentation is published
+// there. Netlify serves `name.html` at `/name` too, so both forms count.
+const DOC_SAMPLES = ["/doc/KeyRevocationRecords", "/doc/KeyRevocationRecords.html"];
+
+/**
+ * Every path Netlify serves from `public/`: one per file, `/` for index.html,
+ * and the extensionless form of each `.html` file. `_headers` is Netlify's
+ * configuration, not served.
+ */
+async function servedPaths() {
+  const paths = [];
+  for (const entry of await readdir(PUBLIC, { recursive: true, withFileTypes: true })) {
+    if (!entry.isFile()) continue;
+    const path = "/" + relative(PUBLIC, join(entry.parentPath, entry.name)).split(sep).join("/");
+    if (path === "/_headers") continue;
+    paths.push(path);
+    if (path === "/index.html") paths.push("/");
+    else if (path.endsWith(".html")) paths.push(path.slice(0, -".html".length));
+  }
+  return paths;
+}
 
 /** robots.txt as groups: { agents: [...], rules: [[field, value], ...] }. */
 function parseRobots(text) {
@@ -123,30 +151,55 @@ test("directive checks compare whole directives, not substrings", () => {
 });
 
 /**
- * Why robots.txt fails to block every path for every crawler, or null if it
- * does. The rules of all `User-agent: *` groups count together. Any `Allow`
- * among them is refused: for Google, `Allow: /` beats `Disallow: /`.
+ * Whether robots.txt lets a crawler without a group of its own fetch `path`,
+ * per RFC 9309: the rules of every `User-agent: *` group count together; the
+ * longest matching rule wins; `Allow` wins a tie; an empty `Disallow`
+ * matches nothing; `*` matches any run of characters and a final `$`
+ * anchors the end; no matching rule means allowed. Paths are case-sensitive.
  */
-function robotsGap(text) {
-  const rules = parseRobots(text).filter((g) => g.agents.includes("*")).flatMap((g) => g.rules);
-  if (!rules.length) return "no `User-agent: *` group with rules";
-  if (rules.some(([field]) => field === "allow")) return "an `Allow` rule in the `User-agent: *` group";
-  if (!rules.some(([field, value]) => field === "disallow" && value === "/")) return "no `Disallow: /`";
-  return null;
+function robotsAllows(text, path) {
+  let best = null;
+  for (const [field, value] of parseRobots(text).filter((g) => g.agents.includes("*")).flatMap((g) => g.rules)) {
+    if ((field !== "allow" && field !== "disallow") || value === "") continue;
+    const anchored = value.endsWith("$");
+    const pattern = (anchored ? value.slice(0, -1) : value)
+      .split("*").map((part) => part.replace(/[.+?^${}()|[\]\\]/g, "\\$&")).join(".*");
+    if (!new RegExp(`^${pattern}${anchored ? "$" : ""}`).test(path)) continue;
+    const allow = field === "allow";
+    if (!best || value.length > best.length || (value.length === best.length && allow))
+      best = { length: value.length, allow };
+  }
+  return best ? best.allow : true;
 }
 
-test("robots.txt asks every crawler to fetch nothing", async () => {
-  assert.equal(robotsGap(await read("robots.txt")), null);
+// REVIEW PLACEHOLDER: "robots.txt asks every crawler to fetch nothing" -> "robots.txt lets crawlers fetch /doc/ and nothing else"
+test("robots.txt lets crawlers fetch /doc/ and nothing else", async () => {
+  const text = await read("robots.txt");
+  for (const path of [...await servedPaths(), ...DOC_SAMPLES])
+    assert.equal(robotsAllows(text, path), indexable(path), `robots.txt on ${path}`);
 });
 
-for (const path of ["/", "/robots.txt", DID_PATH, "/any/other/path"]) {
-  test(`${path} is served with X-Robots-Tag: noindex, nofollow, noarchive`, async () => {
-    const found = headersFor(parseHeaders(await read("_headers")), path)
-      .filter((h) => h.name === "x-robots-tag");
+// REVIEW PLACEHOLDER: "/any/other/path is served with X-Robots-Tag: noindex, nofollow, noarchive" -> "every file served outside /doc/ gets X-Robots-Tag: noindex, nofollow, noarchive"
+// A path that matches no file is a 404, which no engine indexes. It is no
+// longer covered by a catch-all, since a catch-all `/*` would reach /doc/ too.
+test("every file served outside /doc/ gets X-Robots-Tag: noindex, nofollow, noarchive", async () => {
+  const rules = parseHeaders(await read("_headers"));
+  const paths = (await servedPaths()).filter((path) => !indexable(path));
+  assert.ok(paths.includes("/") && paths.includes(DID_PATH), `unexpected served paths: ${paths}`);
+  for (const path of paths) {
+    const found = headersFor(rules, path).filter((h) => h.name === "x-robots-tag");
     assert.equal(found.length, 1, `expected one X-Robots-Tag for ${path}, got ${found.length}`);
-    assert.deepEqual(robotsLacks(found[0].value), [], `X-Robots-Tag: ${found[0].value}`);
-  });
-}
+    assert.deepEqual(robotsLacks(found[0].value), [], `${path}: X-Robots-Tag: ${found[0].value}`);
+  }
+});
+
+test("documentation under /doc/ is served without X-Robots-Tag", async () => {
+  const rules = parseHeaders(await read("_headers"));
+  for (const path of [...(await servedPaths()).filter(indexable), ...DOC_SAMPLES]) {
+    const found = headersFor(rules, path).filter((h) => h.name === "x-robots-tag");
+    assert.deepEqual(found, [], `${path} gets X-Robots-Tag from ${found.map((h) => h.rule)}`);
+  }
+});
 
 test("the DID document keeps what a resolver needs, and is not indexed", async () => {
   const got = Object.fromEntries(
@@ -170,18 +223,30 @@ test("no header reaches the DID document from two rules", async () => {
 
 // --- edge cases ---------------------------------------------------------------
 
-test("robots.txt: look-alikes of `Disallow: /` are refused", () => {
-  for (const [text, gap] of [
-    ["User-agent: *\nDisallow: /\n", null],
-    ["User-agent: *\nDisallow: / # all of it\n", null],
-    ["User-agent: Googlebot\nUser-agent: *\nDisallow: /\n", null],
-    ["User-agent: *\nDisallow:\n", "no `Disallow: /`"],
-    ["User-agent: *\nDisallow: /private\n", "no `Disallow: /`"],
-    ["User-agent: *\nDisallow: /\nAllow: /\n", "an `Allow` rule in the `User-agent: *` group"],
-    ["User-agent: Googlebot\nDisallow: /\n", "no `User-agent: *` group with rules"],
-    ["Disallow: /\n", "no `User-agent: *` group with rules"],
-    ["# User-agent: *\n# Disallow: /\n", "no `User-agent: *` group with rules"],
-  ]) assert.equal(robotsGap(text), gap, JSON.stringify(text));
+// REVIEW PLACEHOLDER: "robots.txt: look-alikes of `Disallow: /` are refused" -> "robots.txt: the evaluator follows RFC 9309, and look-alikes of the /doc/ exception are refused"
+test("robots.txt: the evaluator follows RFC 9309, and look-alikes of the /doc/ exception are refused", () => {
+  const site = "User-agent: *\nAllow: /doc/\nDisallow: /\n";
+  for (const [text, path, allowed] of [
+    [site, "/doc/KeyRevocationRecords", true],
+    [site, "/doc/", true],
+    [site, "/", false],
+    [site, "/.well-known/did.json", false],
+    [site, "/doc", false],
+    [site, "/docs/KeyRevocationRecords", false],
+    [site, "/document", false],
+    [site, "/DOC/KeyRevocationRecords", false],
+    ["User-agent: *\nDisallow: /\nAllow: /doc/\n", "/doc/x", true],
+    ["User-agent: *\nDisallow: /\n", "/doc/x", false],
+    ["User-agent: *\nDisallow: / # all of it\n", "/x", false],
+    ["User-agent: Googlebot\nUser-agent: *\nDisallow: /\n", "/x", false],
+    ["User-agent: *\nDisallow:\n", "/x", true],
+    ["User-agent: *\nDisallow: /private\n", "/x", true],
+    ["User-agent: *\nDisallow: /\nAllow: /\n", "/x", true],
+    ["User-agent: Googlebot\nDisallow: /\n", "/x", true],
+    ["# User-agent: *\n# Disallow: /\n", "/x", true],
+    ["User-agent: *\nDisallow: /\nAllow: /*.html$\n", "/a.html", true],
+    ["User-agent: *\nDisallow: /\nAllow: /*.html$\n", "/a.html.bak", false],
+  ]) assert.equal(robotsAllows(text, path), allowed, `${JSON.stringify(text)} on ${path}`);
 });
 
 test("_headers: a `/*` rule applies to the DID document wherever it is written", () => {
